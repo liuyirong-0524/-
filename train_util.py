@@ -28,15 +28,57 @@ INITIAL_LOG_LOSS_SCALE = 20.0
 import torch.nn.functional as F
 
 def count_parameters(model):
+    """
+    Functionality:
+    Calculates the total number of trainable parameters in a neural network model.
+    A parameter is considered trainable if its 'requires_grad' attribute is True.
+
+    Inputs:
+    :param model: The neural network model whose parameters are to be counted 
+
+    Outputs:
+    :return: The total count of trainable parameters in the model.
+    :rtype: int
+    """
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
 def get_truncated_normal(mean=0, sd=1, low=0, upp=10):
+    """
+    Functionality:
+    Creates an instance of the Truncated Normal Distribution (truncnorm) from scipy.stats.
+
+    Inputs:
+    :param mean: The mean of the underlying normal distribution.
+    :type mean: float
+    :param sd: The standard deviation of the underlying normal distribution.
+    :type sd: float
+    :param low: The lower bound for truncation.
+    :type low: float
+    :param upp: The upper bound for truncation.
+    :type upp: float
+
+    Outputs:
+    :return: A scipy.stats.truncnorm frozen distribution object, which can be used for sampling.
+    :rtype: scipy.stats._distn_infrastructure.rv_frozen
+    """
     return truncnorm(
         (low - mean) / sd, (upp - mean) / sd, loc=mean, scale=sd)
 
 
 def np2tensor(arr):
+    """
+    Functionality:
+    Converts a NumPy array or list into a floating-point PyTorch Tensor.
+
+    Inputs:
+    :param arr: The input array or list to be converted.
+    :type arr: Union[np.ndarray, list]
+
+    Outputs:
+    :return: The converted floating-point PyTorch Tensor.
+    :rtype: torch.Tensor
+    """
     return th.from_numpy(np.array(arr)).float()
 
 import time
@@ -71,7 +113,30 @@ class TrainLoop:
         SR_times=10,
         epoch=1000
     ):
-        # ==================== 基本参数 ====================
+        """
+        Functionality:
+        Initializes the training loop, setting up the model, diffusion process, data, 
+        optimizer, mixed-precision training, logging, and checkpointing configurations.
+
+        Inputs:
+        :param model: The neural network model to be trained.
+        :param diffusion: The Diffusion Model object, containing the forward/reverse process logic.
+        :param data: The training dataset.
+        :param batch_size: The total batch size used for training across all devices.
+        :param microbatch: The microbatch size used for gradient accumulation (must be <= batch_size).
+        :param lr: The initial learning rate.
+        :param ema_rate: The EMA (Exponential Moving Average) decay rate(s), as a float or comma-separated string.
+        :param log_interval: The step interval for outputting logs.
+        :param save_interval: The step interval for saving checkpoints.
+        :param resume_checkpoint: The file path to a checkpoint to resume training from.
+        :param use_fp16: Flag to enable FP16 mixed-precision training.
+        :param fp16_scale_growth: The growth factor for the FP16 loss scaler.
+        :param schedule_sampler: The strategy for sampling time steps (e.g., LossAwareSampler or UniformSampler).
+        :param weight_decay: The weight decay coefficient for the optimizer.
+        :param lr_anneal_steps: The total number of steps over which to anneal the learning rate.
+        :param SR_times: Super-resolution related parameter, potentially used for data preprocessing.
+        :param epoch: The total number of training epochs.
+        """
         self.model = model
         self.diffusion = diffusion
         self.data = data
@@ -83,23 +148,19 @@ class TrainLoop:
         self.SR_times = SR_times
         self.epoch = epoch
         
-        # ==================== 训练状态 ====================
         self.step = 0
         self.resume_step = 0
         self.global_batch = self.batch_size
         
-        # ==================== EMA 配置 ====================
         self.ema_rate = (
             [ema_rate] if isinstance(ema_rate, float)
             else [float(x) for x in ema_rate.split(",")]
         )
         
-        # ==================== 日志和保存配置 ====================
         self.log_interval = log_interval
         self.save_interval = save_interval
         self.resume_checkpoint = resume_checkpoint
         
-        # ==================== 混合精度训练 ====================
         self.use_fp16 = use_fp16
         self.fp16_scale_growth = fp16_scale_growth
         self.mp_trainer = MixedPrecisionTrainer(
@@ -108,14 +169,11 @@ class TrainLoop:
             fp16_scale_growth=fp16_scale_growth,
         )
         
-        # ==================== 采样器 ====================
         self.schedule_sampler = schedule_sampler or UniformSampler(diffusion)
         
-        # ==================== 设备配置 ====================
         self.sync_cuda = torch.cuda.is_available()
         self.device = torch.device("cuda" if self.sync_cuda else "cpu")
         
-        # ==================== 加载模型和优化器 ====================
         self._load_parameters()
         
         print(f'Number of Trainable Parameters: {count_parameters(model)}')
@@ -126,14 +184,15 @@ class TrainLoop:
             weight_decay=self.weight_decay
         )
         
-        # 不使用 DDP 包装
         self.ddp_model = self.model
         
-        # ==================== 数据加载器 ====================
         self.data_loader = self._create_dataloader_with_prefetch()
     
     def _load_parameters(self):
-        """加载模型检查点"""
+        """
+        Functionality:
+        Loads the model parameters from a specified checkpoint file and sets the resume step.
+        """
         resume_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
         
         if resume_checkpoint:
@@ -144,7 +203,11 @@ class TrainLoop:
             self.model.load_state_dict(state_dict)
     
     def _load_optimizer_state(self):
-        """加载优化器状态"""
+        """
+        Functionality:
+        Loads the optimizer's state (e.g., AdamW momentum buffers) from a corresponding 
+        checkpoint file to resume training smoothly.
+        """
         main_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
         opt_checkpoint = bf.join(
             bf.dirname(main_checkpoint),
@@ -158,10 +221,17 @@ class TrainLoop:
     
     def _create_base_loader(self, deterministic=False):
         """
-        创建基础数据加载器
-        
-        Args:
-            deterministic: 是否使用确定性加载 (不shuffle)
+        Functionality:
+        Creates a basic PyTorch DataLoader from the dataset and wraps it into an 
+        infinite-loop generator, which yields batches continuously.
+
+        Inputs:
+        :param deterministic: Whether to use deterministic loading (i.e., disable shuffling).
+        :type deterministic: bool
+
+        Outputs:
+        :return: A generator that infinitely yields batches from the DataLoader.
+        :rtype: Generator
         """
         num_workers = min(32, os.cpu_count() // 4)
         
@@ -176,21 +246,27 @@ class TrainLoop:
             persistent_workers=True,
         )
         
-        # 无限循环迭代器
         while True:
             yield from loader
     
     def _create_dataloader_with_prefetch(self, max_prefetch=4):
         """
-        创建带预取功能的数据加载器
-        
-        Args:
-            max_prefetch: 预取队列的最大长度
+        Functionality:
+        Creates a data loader generator with prefetching capabilities. It maintains 
+        a prefetch queue to ensure CPU prepares the next batch while the GPU is processing 
+        the current one, improving training throughput.
+
+        Inputs:
+        :param max_prefetch: The maximum length of the prefetch queue (number of batches to load ahead).
+        :type max_prefetch: int
+
+        Outputs:
+        :return: A generator that sequentially yields prefetched batches in the format (SR_ST, model_kwargs).
+        :rtype: Generator
         """
         base_loader = self._create_base_loader()
         prefetch_queue = []
         
-        # 初始化预取队列
         for _ in range(max_prefetch):
             try:
                 batch_data = self._fetch_and_prepare_batch(base_loader)
@@ -199,12 +275,9 @@ class TrainLoop:
             except StopIteration:
                 break
         
-        # 生成批次并维护预取队列
         while prefetch_queue:
-            # 返回队列头部的批次
             yield prefetch_queue.pop(0)
             
-            # 向队列尾部添加新批次
             try:
                 batch_data = self._fetch_and_prepare_batch(base_loader)
                 if batch_data:
@@ -214,10 +287,19 @@ class TrainLoop:
     
     def _fetch_and_prepare_batch(self, loader):
         """
-        从加载器获取批次并准备模型输入
-        
-        Returns:
-            tuple: (SR_ST, model_kwargs) 或 None
+        Functionality:
+        Retrieves the next raw batch from the base loader and processes it into the 
+        (target image, conditioning dictionary) format required for the model.
+
+        Inputs:
+        :param loader: The base data loader iterator (infinite generator).
+        :type loader: Generator
+
+        Outputs:
+        :return: A tuple containing (SR_ST, model_kwargs), where SR_ST is the target image 
+                 and model_kwargs is the dictionary of conditioning information. 
+                 Returns None if the data iteration has stopped.
+        :rtype: Optional[Tuple[torch.Tensor, Dict[str, torch.Tensor]]]
         """
         try:
             SR_ST, spot_ST, WSI_5120, WSI_320, gene_class, Gene_index_map, metadata_feature, scale_gt, co_expression, WSI_mask, sc, scgpt, pre_he = next(loader)
@@ -244,14 +326,20 @@ class TrainLoop:
     
     def _calculate_training_ratio(self, current_step, total_steps):
         """
-        根据训练进度计算数据使用比例
-        
-        Args:
-            current_step: 当前步数
-            total_steps: 总步数
-        
-        Returns:
-            float: 数据使用比例 (0.1 到 1.0)
+        Functionality:
+        Dynamically calculates a data usage ratio based on the current training progress. 
+        This is typically used in diffusion models to progressively increase the data's 
+        contribution to stabilize training in early stages.
+
+        Inputs:
+        :param current_step: The current number of training steps completed.
+        :type current_step: int
+        :param total_steps: The total number of planned training steps.
+        :type total_steps: int
+
+        Outputs:
+        :return: The calculated data usage ratio, ranging from 0.1 to 1.0.
+        :rtype: float
         """
         ratio_schedule = [
             (0.1, 0.1),
@@ -276,24 +364,32 @@ class TrainLoop:
     
     def _format_time(self, seconds):
         """
-        格式化时间为 HH:MM:SS
-        
-        Args:
-            seconds: 秒数
-        
-        Returns:
-            str: 格式化的时间字符串
+        Functionality:
+        Formats a given duration in seconds into a human-readable HH:MM:SS string.
+
+        Inputs:
+        :param seconds: The time duration in seconds.
+        :type seconds: float or int
+
+        Outputs:
+        :return: The formatted time string (HH:MM:SS).
+        :rtype: str
         """
         m, s = divmod(seconds, 60)
         h, m = divmod(m, 60)
         return f"{int(h):02d}:{int(m):02d}:{int(s):02d}"
     
     def run_loop(self):
-        """主训练循环"""
-        # 计算总迭代次数
+        """
+        Functionality:
+        The main training loop. It iterates over training steps, controls logging, 
+        learning rate annealing, and checkpoint saving until the total number of 
+        iterations is reached.
+        """
+        # Calculate total iterations
         total_iterations = int(99 * self.epoch / self.batch_size) + 1
         
-        # 初始化计时
+        # Initialize timing
         loop_start_time = time.time()
         
         logger.log(f"Starting training loop: {total_iterations} iterations")
@@ -301,24 +397,21 @@ class TrainLoop:
         while self.step <= total_iterations:
             step_start_time = time.time()
             
-            # 计算当前训练比例
+            # Calculate current training ratio
             ratio = self._calculate_training_ratio(self.step, total_iterations)
             
-            # 获取批次并执行训练步骤
+            # Get batch and run training step
             batch, cond = next(self.data_loader)
             self.run_step(batch, cond, ratio)
             
-            # 计算时间统计
             current_time = time.time()
             step_duration = current_time - step_start_time
             total_duration = current_time - loop_start_time
             
-            # 估算剩余时间
             remaining_steps = total_iterations - self.step
             avg_time_per_step = total_duration / (self.step + 1)
             estimated_remaining = avg_time_per_step * remaining_steps
             
-            # 日志输出
             if self.step % self.log_interval == 0:
                 logger.log(
                     f"Step {self.step}/{total_iterations} | "
@@ -329,17 +422,14 @@ class TrainLoop:
                 )
                 logger.dumpkvs()
             
-            # 保存检查点
             if self.step % self.save_interval == 0 and self.step != 0:
                 self.save()
                 
-                # 测试模式下提前退出
                 if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
                     return
             
             self.step += 1
         
-        # 保存最终检查点
         if (self.step - 1) % self.save_interval != 0:
             self.save()
         
@@ -347,58 +437,66 @@ class TrainLoop:
     
     def run_step(self, batch, cond, ratio):
         """
-        执行单个训练步骤
-        
-        Args:
-            batch: 输入批次
-            cond: 条件信息
-            ratio: 训练数据使用比例
+        Functionality:
+        Executes a single, complete training step, including the forward-backward pass, 
+        optimizer update, learning rate annealing, and logging.
+
+        Inputs:
+        :param batch: The current input image batch [B, C, H, W].
+        :type batch: torch.Tensor
+        :param cond: The conditioning information dictionary for the batch.
+        :type cond: Dict[str, torch.Tensor]
+        :param ratio: The data usage ratio for the current step.
+        :type ratio: float
+
+        Outputs:
+        None (Updates model parameters and optimizer state).
         """
-        # 前向传播和反向传播
+        # Forward and backward pass
         self.forward_backward(batch, cond, ratio)
         
-        # 优化器步骤
+        # Optimizer step
         took_step = self.mp_trainer.optimize(self.opt)
         
-        # 学习率退火
+        # Learning rate annealing
         self._anneal_lr()
         
-        # 记录日志
+        # Log statistics
         self.log_step()
     
     def forward_backward(self, batch, cond, ratio):
         """
-        执行前向传播和反向传播
-        
-        Args:
-            batch: 输入批次 [B, C, H, W]
-            cond: 条件字典
-            ratio: 训练数据使用比例
+        Functionality:
+        Performs the forward and backward passes, incorporating micro-batching 
+        for gradient accumulation. It calculates the loss for sampled time steps 
+        and updates the schedule sampler.
+
+        Inputs:
+        :param batch: The full input image batch [B, C, H, W].
+        :type batch: torch.Tensor
+        :param cond: The full conditioning dictionary.
+        :type cond: Dict[str, torch.Tensor]
+        :param ratio: The data usage ratio.
+        :type ratio: float
         """
         self.mp_trainer.zero_grad()
         
-        # 微批次处理
+        # Micro-batching loop
         for i in range(0, batch.shape[0], self.microbatch):
-            # 提取微批次
             micro = batch[i:i + self.microbatch].to(self.device)
             
-            # SR_times=5 时需要插值到 256x256
             if self.SR_times == 5:
                 micro = F.interpolate(micro, size=(256, 256))
-            
-            # 准备微批次条件
+        
             micro_cond = {
                 k: v[i:i + self.microbatch].to(self.device)
                 for k, v in cond.items()
             }
             
-            # 判断是否为最后一个微批次
             last_batch = (i + self.microbatch) >= batch.shape[0]
             
-            # 采样时间步
             t, weights = self.schedule_sampler.sample(micro.shape[0], self.device)
             
-            # 计算损失
             compute_losses = functools.partial(
                 self.diffusion.training_losses,
                 self.ddp_model,
@@ -410,25 +508,25 @@ class TrainLoop:
             
             losses = compute_losses()
             
-            # 更新采样器
             if isinstance(self.schedule_sampler, LossAwareSampler):
                 self.schedule_sampler.update_with_local_losses(
                     t, losses["loss"].detach()
                 )
             
-            # 加权平均损失
             loss = (losses["loss"] * weights).mean()
             
-            # 记录损失
             log_loss_dict(
                 self.diffusion, t, {k: v * weights for k, v in losses.items()}
             )
             
-            # 反向传播
             self.mp_trainer.backward(loss)
     
     def _anneal_lr(self):
-        """学习率退火"""
+        """
+        Functionality:
+        Performs linear learning rate (LR) annealing, reducing the LR from its initial 
+        value to zero over the total number of annealing steps (self.lr_anneal_steps).
+        """
         if not self.lr_anneal_steps:
             return
         
@@ -439,12 +537,20 @@ class TrainLoop:
             param_group["lr"] = lr
     
     def log_step(self):
-        """记录当前步骤的统计信息"""
+        """
+        Functionality:
+        Logs the current global step number and the total number of samples processed 
+        since the beginning of training (or resumption).
+        """
         logger.logkv("step", self.step + self.resume_step)
         logger.logkv("samples", (self.step + self.resume_step + 1) * self.global_batch)
     
     def save(self):
-        """保存模型检查点"""
+        """
+        Functionality:
+        Saves the current model parameters as a checkpoint file. 
+        It saves the state dictionary of the master parameters.
+        """
         def save_checkpoint(rate, params):
             state_dict = self.mp_trainer.master_params_to_state_dict(params)
             
@@ -458,7 +564,10 @@ class TrainLoop:
         save_checkpoint(0, self.mp_trainer.master_params)
     
     def save_optimizer_state(self):
-        """保存优化器状态 (可选功能)"""
+        """
+        Functionality:
+        Saves the state dictionary of the current optimizer (self.opt) to a file.
+        """
         filename = f"opt{(self.step + self.resume_step):06d}.pt"
         logger.log(f"Saving optimizer state: {filename}")
         
@@ -467,8 +576,17 @@ class TrainLoop:
 
 def parse_resume_step_from_filename(filename):
     """
-    Parse filenames of the form path/to/modelNNNNNN.pt, where NNNNNN is the
-    checkpoint's number of steps.
+    Functionality:
+    Parses the training step number (NNNNNN) from a checkpoint filename 
+    in the format "path/to/modelNNNNNN.pt".
+
+    Inputs:
+    :param filename: The path or filename of the checkpoint.
+    :type filename: str
+
+    Outputs:
+    :return: The extracted training step number, or 0 if parsing fails.
+    :rtype: int
     """
     split = filename.split("model")
     if len(split) < 2:
@@ -481,18 +599,41 @@ def parse_resume_step_from_filename(filename):
 
 
 def get_blob_logdir():
-    # You can change this to be a separate path to save checkpoints to
-    # a blobstore or some external drive.
+    """
+    Functionality:
+    Retrieves the directory path designated for saving logs and checkpoints.
+
+    Outputs:
+    :return: The directory path for logs and checkpoints.
+    :rtype: str
+    """
     return logger.get_dir()
 
 
 def find_resume_checkpoint():
-    # On your infrastructure, you may want to override this to automatically
+    # On your infrastructure, you may want to override this to automatically 
     # discover the latest checkpoint on your blob storage, etc.
     return None
 
 
 def find_ema_checkpoint(main_checkpoint, step, rate):
+    """
+    Functionality:
+    Constructs and checks for the existence of an Exponential Moving Average (EMA) 
+    checkpoint file based on the main checkpoint path, step number, and EMA rate.
+
+    Inputs:
+    :param main_checkpoint: The file path of the main model checkpoint.
+    :type main_checkpoint: Optional[str]
+    :param step: The training step corresponding to the checkpoint.
+    :type step: int
+    :param rate: The decay rate of the EMA.
+    :type rate: float
+
+    Outputs:
+    :return: The path to the EMA checkpoint file if it exists, otherwise None.
+    :rtype: Optional[str]
+    """
     if main_checkpoint is None:
         return None
     filename = f"ema_{rate}_{(step):06d}.pt"
@@ -503,6 +644,18 @@ def find_ema_checkpoint(main_checkpoint, step, rate):
 
 
 def log_loss_dict(diffusion, ts, losses):
+    """
+    Functionality:
+    Logs the mean of each loss term in the provided dictionary to the logging system.
+
+    Inputs:
+    :param diffusion: The diffusion model object, used for potential time step analysis (currently commented out).
+    :type diffusion: object
+    :param ts: The sampled timesteps for the current batch.
+    :type ts: torch.Tensor
+    :param losses: A dictionary where keys are loss names and values are the corresponding loss tensors.
+    :type losses: Dict[str, torch.Tensor]
+    """
     for key, values in losses.items():
         logger.logkv_mean(key, values.mean().item())
         # Log the quantiles (four quartiles, in particular).
